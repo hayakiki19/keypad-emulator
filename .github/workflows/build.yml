@@ -16,12 +16,10 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install pyinstaller pynput
-          pip install vgamepad --prefer-binary
+        run: pip install pyinstaller pynput
 
       - name: Build EXE
-        run: pyinstaller --onefile --windowed --name KeyPadEmulator keypad_emulator.py
+        run: pyinstaller --onefile --windowed --name KeyPadEmulator --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 keypad_emulator.py
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
