@@ -16,7 +16,9 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install pyinstaller vgamepad pynput
+        run: |
+          pip install pyinstaller pynput
+          pip install vgamepad --prefer-binary
 
       - name: Build EXE
         run: pyinstaller --onefile --windowed --name KeyPadEmulator keypad_emulator.py
@@ -25,3 +27,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: KeyPadEmulator
+          path: dist/KeyPadEmulator.exe
