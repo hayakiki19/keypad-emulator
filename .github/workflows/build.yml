@@ -16,9 +16,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        env:
-          VGAMEPAD_SKIP_VIGEMBUS_INSTALL: "true"
-        run: pip install pyinstaller pynput vgamepad
+        run: pip install pyinstaller pynput vgamepad-0.1.0-py3-none-any.whl
 
       - name: Build EXE
         run: pyinstaller --onefile --windowed --name KeyPadEmulator --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 --collect-all vgamepad keypad_emulator.py
