@@ -88,11 +88,15 @@ LS_BUTTONS = {"LS_UP", "LS_DOWN", "LS_LEFT", "LS_RIGHT"}
 # Emulator core
 # ─────────────────────────────────────────────
 class GamepadEmulator:
-    def __init__(self, key_map, mouse_sensitivity=0.5, ls_sensitivity=1.0, dead_zone=0.1):
+    def __init__(self, key_map, mouse_sensitivity=0.5, ls_sensitivity=1.0, dead_zone=0.1,
+                 stick_smoothing=0.3):
         self.key_map = key_map  # action → key/button string
         self.mouse_sensitivity = mouse_sensitivity
         self.ls_sensitivity = ls_sensitivity
         self.dead_zone = dead_zone
+        # stick_smoothing: 0.05 = very smooth/gradual (more "lag"),
+        #                  1.0  = instant/snappy (old digital-switch feel)
+        self.stick_smoothing = stick_smoothing
 
         self.gamepad = None
         self.active = False
@@ -166,49 +170,66 @@ class GamepadEmulator:
     # ── update loop ───────────────────────────────────────
     def _update_loop(self, fps=60):
         interval = 1.0 / fps
-        MAX_AXIS = 32767
-        axis_accel = {}  # for smooth stick movement
+
+        # Persistent "current" stick values that ease toward their target
+        # each tick, instead of snapping instantly. This is what makes
+        # input feel like a real analog stick instead of a digital on/off
+        # switch — eliminating the jittery keyboard/mouse feel in-game.
+        ls_cur_x, ls_cur_y = 0.0, 0.0
+        rs_cur_x, rs_cur_y = 0.0, 0.0
+
+        def apply_dz(v):
+            if abs(v) < self.dead_zone: return 0.0
+            sign = 1 if v > 0 else -1
+            return sign * (abs(v) - self.dead_zone) / (1.0 - self.dead_zone)
 
         while self.active:
             t0 = time.perf_counter()
+            smooth = self.stick_smoothing
 
-            # --- right stick from mouse ---
+            # --- right stick target from mouse ---
             with self._mouse_lock:
                 mdx = self._mouse_dx * self.mouse_sensitivity
                 mdy = self._mouse_dy * self.mouse_sensitivity
                 self._mouse_dx = 0.0
                 self._mouse_dy = 0.0
 
-            rs_x = max(-1.0, min(1.0, mdx / 20.0))
-            rs_y = max(-1.0, min(1.0, -mdy / 20.0))
+            target_rs_x = max(-1.0, min(1.0, mdx / 20.0))
+            target_rs_y = max(-1.0, min(1.0, -mdy / 20.0))
 
-            # dead zone
-            def apply_dz(v):
-                if abs(v) < self.dead_zone: return 0.0
-                sign = 1 if v > 0 else -1
-                return sign * (abs(v) - self.dead_zone) / (1.0 - self.dead_zone)
+            # ease current value toward target (removes snap-to-zero jitter
+            # the instant the mouse pauses, and smooths noisy mouse samples)
+            rs_cur_x += (target_rs_x - rs_cur_x) * smooth
+            rs_cur_y += (target_rs_y - rs_cur_y) * smooth
 
-            rs_x = apply_dz(rs_x)
-            rs_y = apply_dz(rs_y)
+            rs_x = apply_dz(rs_cur_x)
+            rs_y = apply_dz(rs_cur_y)
 
-            # --- left stick from keys ---
-            ls_x = 0.0
-            ls_y = 0.0
+            # --- left stick target from keys ---
+            target_ls_x = 0.0
+            target_ls_y = 0.0
             for action, key_str in self.key_map.items():
                 if key_str.lower() not in self.pressed:
                     continue
-                if action == "LS_UP": ls_y += 1.0
-                if action == "LS_DOWN": ls_y -= 1.0
-                if action == "LS_LEFT": ls_x -= 1.0
-                if action == "LS_RIGHT": ls_x += 1.0
+                if action == "LS_UP": target_ls_y += 1.0
+                if action == "LS_DOWN": target_ls_y -= 1.0
+                if action == "LS_LEFT": target_ls_x -= 1.0
+                if action == "LS_RIGHT": target_ls_x += 1.0
 
             # normalise diagonal
-            mag = math.sqrt(ls_x**2 + ls_y**2)
+            mag = math.sqrt(target_ls_x**2 + target_ls_y**2)
             if mag > 1.0:
-                ls_x /= mag
-                ls_y /= mag
-            ls_x *= self.ls_sensitivity
-            ls_y *= self.ls_sensitivity
+                target_ls_x /= mag
+                target_ls_y /= mag
+            target_ls_x *= self.ls_sensitivity
+            target_ls_y *= self.ls_sensitivity
+
+            # ease current value toward target (gives the left stick a
+            # real acceleration/deceleration ramp instead of an instant
+            # full-speed snap on key-press / key-release)
+            ls_cur_x += (target_ls_x - ls_cur_x) * smooth
+            ls_cur_y += (target_ls_y - ls_cur_y) * smooth
+            ls_x, ls_y = ls_cur_x, ls_cur_y
 
             # --- triggers ---
             lt = 255 if self.key_map.get("TRIGGER_LT", "").lower() in self.pressed else 0
@@ -280,7 +301,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("KeyPad Emulator")
-        self.resizable(False, False)
+        self.resizable(True, True)
         self.configure(bg="#1e1e2e")
 
         self.key_map = dict(DEFAULT_MAP)
@@ -333,19 +354,24 @@ class App(tk.Tk):
         nb.add(map_frame, text="Button Mapping")
 
         canvas = tk.Canvas(map_frame, bg=BG, highlightthickness=0)
-        scroll = ttk.Scrollbar(map_frame, orient="vertical", command=canvas.yview)
+        vscroll = ttk.Scrollbar(map_frame, orient="vertical", command=canvas.yview)
+        hscroll = ttk.Scrollbar(map_frame, orient="horizontal", command=canvas.xview)
         inner = tk.Frame(canvas, bg=BG)
         inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scroll.set)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.configure(yscrollcommand=vscroll.set, xscrollcommand=hscroll.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vscroll.grid(row=0, column=1, sticky="ns")
+        hscroll.grid(row=1, column=0, sticky="ew")
+        map_frame.rowconfigure(0, weight=1)
+        map_frame.columnconfigure(0, weight=1)
 
-        col = 0
+        row_i, col_i = 0, 0
+        GROUPS_PER_ROW = 3
         for group_name, actions in BUTTON_GROUPS:
             grp = tk.LabelFrame(inner, text=f" {group_name} ", font=("Segoe UI", 10, "bold"),
                                  bg=CARD, fg=ACC, bd=0, padx=10, pady=8, labelanchor="nw")
-            grp.grid(row=0, column=col, padx=8, pady=8, sticky="n")
+            grp.grid(row=row_i, column=col_i, padx=8, pady=8, sticky="n")
 
             for action in actions:
                 row_f = tk.Frame(grp, bg=CARD)
@@ -361,7 +387,11 @@ class App(tk.Tk):
                                  cursor="hand2", command=lambda a=action: self.start_listen(a))
                 btn.pack(side=tk.LEFT, padx=4)
                 self.entry_widgets[action] = btn
-            col += 1
+
+            col_i += 1
+            if col_i >= GROUPS_PER_ROW:
+                col_i = 0
+                row_i += 1
 
         # --- Settings tab ---
         settings_frame = tk.Frame(nb, bg=BG, padx=20, pady=16)
@@ -382,9 +412,15 @@ class App(tk.Tk):
         self.ms_scale = slider_row(settings_frame, "Mouse Sensitivity", 0.1, 2.0, 0.5, lambda v: f"{v:.1f}")
         self.ls_scale = slider_row(settings_frame, "Left Stick Speed", 0.1, 2.0, 1.0, lambda v: f"{v:.1f}")
         self.dz_scale = slider_row(settings_frame, "Dead Zone", 0.0, 0.5, 0.1, lambda v: f"{int(v*100)}%")
+        self.sm_scale = slider_row(settings_frame, "Stick Smoothing", 0.05, 1.0, 0.3, lambda v: f"{v:.2f}")
 
         tk.Label(settings_frame, text="Right stick is always controlled by mouse movement.",
                  font=("Segoe UI", 9), bg=BG, fg=MUTED).pack(anchor="w", pady=(16, 0))
+        tk.Label(settings_frame,
+                 text="Lower Stick Smoothing = smoother, more analog-like ramp (recommended for a\n"
+                      "real \"controller\" feel). Higher = snappier / more instant, closer to raw\n"
+                      "keyboard & mouse input (can feel jittery in-game).",
+                 font=("Segoe UI", 9), bg=BG, fg=MUTED, justify=tk.LEFT).pack(anchor="w", pady=(8, 0))
 
         # Instructions
         inst_frame = tk.Frame(nb, bg=BG, padx=20, pady=16)
@@ -429,7 +465,8 @@ NOTES
         tk.Label(foot, text="Click any key chip to remap • Mouse → Right Stick",
                  font=("Segoe UI", 9), bg="#11111b", fg=MUTED).pack(side=tk.LEFT)
 
-        self.geometry("860x520")
+        self.geometry("980x640")
+        self.minsize(820, 520)
 
     # ── listen for key press to remap ──────────────────────
     def start_listen(self, action):
@@ -496,6 +533,7 @@ NOTES
                     mouse_sensitivity=self.ms_scale.get(),
                     ls_sensitivity=self.ls_scale.get(),
                     dead_zone=self.dz_scale.get(),
+                    stick_smoothing=self.sm_scale.get(),
                 )
                 emu.start()
                 self.emulator = emu
