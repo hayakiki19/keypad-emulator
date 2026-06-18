@@ -16,6 +16,8 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
+        env:
+          VGAMEPAD_SKIP_VIGEMBUS_INSTALL: "true"
         run: pip install pyinstaller pynput vgamepad
 
       - name: Build EXE
