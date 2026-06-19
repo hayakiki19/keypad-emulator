@@ -1,22 +1,18 @@
 """
-KeyPad Emulator — Keyboard & Mouse -> Virtual Xbox 360 Controller
+KeyPad Emulator — Keyboard & Mouse → Virtual Xbox 360 Controller
 ================================================================
 Requires (Windows only):
-1. ViGEmBus driver -> https://github.com/ViGEm/ViGEmBus/releases
-2. pip install vgamepad pynput
+  1. ViGEmBus driver  → https://github.com/ViGEm/ViGEmBus/releases
+  2. pip install vgamepad pynput
 
-Run as Administrator!
-
-Mouse clicks are captured via a Windows low-level hook (WH_MOUSE_LL)
-which works even when a game has exclusive focus.
+Usage:
+  python keypad_emulator.py
 """
 
 import sys
 import threading
 import time
 import math
-import ctypes
-import ctypes.wintypes
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -27,150 +23,42 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from pynput import keyboard as kb
+    from pynput import keyboard as kb, mouse as ms
 except ImportError:
     print("ERROR: pynput not installed. Run: pip install pynput")
     sys.exit(1)
 
 # ─────────────────────────────────────────────
-# Windows low-level mouse hook via ctypes
-# Captures mouse clicks even inside games
-# ─────────────────────────────────────────────
-
-WH_MOUSE_LL   = 14
-WM_MOUSEMOVE  = 0x0200
-WM_LBUTTONDOWN = 0x0201
-WM_LBUTTONUP   = 0x0202
-WM_RBUTTONDOWN = 0x0204
-WM_RBUTTONUP   = 0x0205
-WM_MBUTTONDOWN = 0x0207
-WM_MBUTTONUP   = 0x0208
-
-class MSLLHOOKSTRUCT(ctypes.Structure):
-    _fields_ = [
-        ("pt",      ctypes.wintypes.POINT),
-        ("mouseData", ctypes.wintypes.DWORD),
-        ("flags",   ctypes.wintypes.DWORD),
-        ("time",    ctypes.wintypes.DWORD),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-    ]
-
-HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int,
-                               ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM)
-
-user32  = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
-
-
-class LowLevelMouseHook:
-    """
-    Installs WH_MOUSE_LL — works even when games have focus.
-    Calls on_move(x, y) and on_button(name, pressed).
-    name is 'button1' (left), 'button2' (right), 'button3' (middle).
-    Must run its message loop on its own thread.
-    """
-
-    def __init__(self, on_move, on_button):
-        self._on_move   = on_move
-        self._on_button = on_button
-        self._hook      = None
-        self._thread    = None
-        self._running   = False
-        self._hook_ref  = None  # keep reference so GC doesn't collect it
-
-    def _hook_proc(self, nCode, wParam, lParam):
-        if nCode >= 0:
-            info = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
-            x, y = info.pt.x, info.pt.y
-
-            if wParam == WM_MOUSEMOVE:
-                self._on_move(x, y)
-            elif wParam == WM_LBUTTONDOWN:
-                self._on_button("button1", True)
-            elif wParam == WM_LBUTTONUP:
-                self._on_button("button1", False)
-            elif wParam == WM_RBUTTONDOWN:
-                self._on_button("button2", True)
-            elif wParam == WM_RBUTTONUP:
-                self._on_button("button2", False)
-            elif wParam == WM_MBUTTONDOWN:
-                self._on_button("button3", True)
-            elif wParam == WM_MBUTTONUP:
-                self._on_button("button3", False)
-
-        return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
-
-    def _run(self):
-        # Install hook on THIS thread — WH_MOUSE_LL must be pumped on same thread
-        self._hook_ref = HOOKPROC(self._hook_proc)
-        self._hook = user32.SetWindowsHookExW(
-            WH_MOUSE_LL, self._hook_ref,
-            kernel32.GetModuleHandleW(None), 0)
-
-        if not self._hook:
-            err = ctypes.get_last_error()
-            print(f"WARNING: Failed to install mouse hook (error {err}). Run as Administrator!")
-            return
-
-        self._thread_id = kernel32.GetCurrentThreadId()
-
-        # Blocking message pump — GetMessageW blocks until a message arrives.
-        # This is the correct way; PeekMessage + sleep misses events.
-        msg = ctypes.wintypes.MSG()
-        while True:
-            ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-            if ret == 0 or ret == -1:
-                break  # WM_QUIT received or error
-            user32.TranslateMessage(ctypes.byref(msg))
-            user32.DispatchMessageW(ctypes.byref(msg))
-
-        if self._hook:
-            user32.UnhookWindowsHookEx(self._hook)
-            self._hook = None
-
-    def start(self):
-        self._running   = True
-        self._thread_id = None
-        self._thread    = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-        # Wait briefly for thread_id to be set
-        for _ in range(50):
-            if self._thread_id:
-                break
-            time.sleep(0.01)
-
-    def stop(self):
-        self._running = False
-        # Post WM_QUIT to unblock GetMessageW on the hook thread
-        if self._thread_id:
-            user32.PostThreadMessageW(self._thread_id, 0x0012, 0, 0)  # WM_QUIT = 0x0012
-
-
-# ─────────────────────────────────────────────
-# Default key mappings — Apex Legends optimized
+# Default key mappings
+# Mouse button names: buttonleft, buttonright, buttonmiddle, buttonx1, buttonx2
 # ─────────────────────────────────────────────
 
 DEFAULT_MAP = {
+    # D-Pad
     "DPAD_UP":    "4",
     "DPAD_DOWN":  "3",
     "DPAD_LEFT":  "5",
     "DPAD_RIGHT": "6",
-    "BTN_A":      "space",
-    "BTN_B":      "c",
-    "BTN_X":      "f",
-    "BTN_Y":      "2",
+    # Face buttons
+    "BTN_A": "space",
+    "BTN_B": "c",
+    "BTN_X": "f",
+    "BTN_Y": "2",
+    # Special
     "BTN_START":  "return",
     "BTN_BACK":   "tab",
     "BTN_LTHUMB": "shift",
     "BTN_RTHUMB": "v",
+    # Shoulders / Triggers
     "BTN_LB":     "q",
     "BTN_RB":     "g",
-    "TRIGGER_LT": "button2",   # right mouse button -> ADS
-    "TRIGGER_RT": "button1",   # left mouse button  -> Fire
-    "LS_UP":      "w",
-    "LS_DOWN":    "s",
-    "LS_LEFT":    "a",
-    "LS_RIGHT":   "d",
+    "TRIGGER_LT": "buttonright",   # Right mouse button → LT (ADS)
+    "TRIGGER_RT": "buttonleft",    # Left mouse button  → RT (Fire)
+    # Left stick (movement)
+    "LS_UP":    "w",
+    "LS_DOWN":  "s",
+    "LS_LEFT":  "a",
+    "LS_RIGHT": "d",
 }
 
 BUTTON_FLAGS = {
@@ -195,32 +83,28 @@ BUTTON_FLAGS = {
 # ─────────────────────────────────────────────
 
 class GamepadEmulator:
-    def __init__(self, key_map, mouse_sensitivity=0.8, ls_sensitivity=1.0,
-                 dead_zone=0.0, stick_smoothing=0.37):
+    def __init__(self, key_map, mouse_sensitivity=0.5, ls_sensitivity=1.0, dead_zone=0.1):
         self.key_map           = key_map
         self.mouse_sensitivity = mouse_sensitivity
         self.ls_sensitivity    = ls_sensitivity
         self.dead_zone         = dead_zone
-        self.stick_smoothing   = stick_smoothing
+        self.gamepad           = None
+        self.active            = False
+        self.pressed           = set()
 
-        self.gamepad    = None
-        self.active     = False
-        self.pressed    = set()
+        # Mouse delta — tracked by diffing absolute positions
+        self._mouse_x      = None
+        self._mouse_y      = None
+        self._mouse_dx     = 0.0
+        self._mouse_dy     = 0.0
+        self._mouse_lock   = threading.Lock()
 
-        self._mouse_x    = None
-        self._mouse_y    = None
-        self._mouse_dx   = 0.0
-        self._mouse_dy   = 0.0
-        self._mouse_lock = threading.Lock()
+        self._kb_listener   = None
+        self._ms_listener   = None
+        self._update_thread = None
+        self._rebuild_reverse()
 
-        self._rs_x_smooth = 0.0
-        self._rs_y_smooth = 0.0
-
-        self._kb_listener    = None
-        self._mouse_hook     = None
-        self._update_thread  = None
-
-    def _build_reverse(self):
+    def _rebuild_reverse(self):
         self._reverse = {}
         for action, key_str in self.key_map.items():
             self._reverse.setdefault(key_str.lower(), []).append(action)
@@ -235,21 +119,30 @@ class GamepadEmulator:
             return {
                 "ctrl_l": "ctrl", "ctrl_r": "ctrl",
                 "shift_l": "shift", "shift_r": "shift",
-                "alt_l": "alt", "alt_r": "alt",
+                "alt_l": "alt",  "alt_r": "alt",
             }.get(name, name)
 
-    # ── callbacks from hook ───────────────────────────────
+    def _norm_mouse_btn(self, btn):
+        # pynput gives e.g. Button.left → "buttonleft"
+        name = str(btn).lower().replace("button.", "button")
+        return name
+
+    # ── pynput listeners ──────────────────────────────────
 
     def _on_key_press(self, key):
-        if not self.active: return
+        if not self.active:
+            return
         self.pressed.add(self._norm_kb(key))
 
     def _on_key_release(self, key):
-        if not self.active: return
+        if not self.active:
+            return
         self.pressed.discard(self._norm_kb(key))
 
     def _on_mouse_move(self, x, y):
-        if not self.active: return
+        """pynput on_move passes absolute (x, y) — we compute delta ourselves."""
+        if not self.active:
+            return
         with self._mouse_lock:
             if self._mouse_x is not None:
                 self._mouse_dx += x - self._mouse_x
@@ -257,48 +150,47 @@ class GamepadEmulator:
             self._mouse_x = x
             self._mouse_y = y
 
-    def _on_mouse_button(self, name, pressed):
-        # name is 'button1', 'button2', 'button3'
-        if not self.active: return
+    def _on_mouse_click(self, x, y, btn, pressed):
+        if not self.active:
+            return
+        k = self._norm_mouse_btn(btn)
         if pressed:
-            self.pressed.add(name)
+            self.pressed.add(k)
         else:
-            self.pressed.discard(name)
+            self.pressed.discard(k)
 
     # ── update loop ───────────────────────────────────────
 
-    def _apply_dz(self, v):
-        if abs(v) < self.dead_zone: return 0.0
-        sign = 1 if v > 0 else -1
-        return sign * (abs(v) - self.dead_zone) / (1.0 - self.dead_zone + 1e-9)
-
     def _update_loop(self, fps=60):
         interval = 1.0 / fps
-        MAX_MOVE = 20.0
 
         while self.active:
             t0 = time.perf_counter()
 
-            # right stick from mouse
+            # Right stick ← mouse delta
             with self._mouse_lock:
                 mdx = self._mouse_dx * self.mouse_sensitivity
                 mdy = self._mouse_dy * self.mouse_sensitivity
                 self._mouse_dx = 0.0
                 self._mouse_dy = 0.0
 
-            raw_rs_x = max(-1.0, min(1.0,  mdx / MAX_MOVE))
-            raw_rs_y = max(-1.0, min(1.0, -mdy / MAX_MOVE))
-            raw_rs_x = self._apply_dz(raw_rs_x)
-            raw_rs_y = self._apply_dz(raw_rs_y)
+            rs_x = max(-1.0, min(1.0, mdx / 20.0))
+            rs_y = max(-1.0, min(1.0, -mdy / 20.0))
 
-            alpha = 1.0 - self.stick_smoothing
-            self._rs_x_smooth += alpha * (raw_rs_x - self._rs_x_smooth)
-            self._rs_y_smooth += alpha * (raw_rs_y - self._rs_y_smooth)
+            def apply_dz(v):
+                if abs(v) < self.dead_zone:
+                    return 0.0
+                sign = 1 if v > 0 else -1
+                return sign * (abs(v) - self.dead_zone) / (1.0 - self.dead_zone)
 
-            # left stick from keys
+            rs_x = apply_dz(rs_x)
+            rs_y = apply_dz(rs_y)
+
+            # Left stick ← WASD keys
             ls_x = ls_y = 0.0
             for action, key_str in self.key_map.items():
-                if key_str.lower() not in self.pressed: continue
+                if key_str.lower() not in self.pressed:
+                    continue
                 if action == "LS_UP":    ls_y += 1.0
                 if action == "LS_DOWN":  ls_y -= 1.0
                 if action == "LS_LEFT":  ls_x -= 1.0
@@ -311,49 +203,51 @@ class GamepadEmulator:
             ls_x *= self.ls_sensitivity
             ls_y *= self.ls_sensitivity
 
-            # triggers
-            lt = 255 if self.key_map.get("TRIGGER_LT","").lower() in self.pressed else 0
-            rt = 255 if self.key_map.get("TRIGGER_RT","").lower() in self.pressed else 0
+            # Triggers
+            lt = 255 if self.key_map.get("TRIGGER_LT", "").lower() in self.pressed else 0
+            rt = 255 if self.key_map.get("TRIGGER_RT", "").lower() in self.pressed else 0
 
-            # buttons
+            # Buttons
             self.gamepad.reset()
             for action, flag in BUTTON_FLAGS.items():
-                if self.key_map.get(action,"").lower() in self.pressed:
+                if self.key_map.get(action, "").lower() in self.pressed:
                     self.gamepad.press_button(button=flag)
 
             self.gamepad.left_joystick_float(ls_x, ls_y)
-            self.gamepad.right_joystick_float(self._rs_x_smooth, self._rs_y_smooth)
+            self.gamepad.right_joystick_float(rs_x, rs_y)
             self.gamepad.left_trigger(value=lt)
             self.gamepad.right_trigger(value=rt)
             self.gamepad.update()
 
-            elapsed = time.perf_counter() - t0
-            rem = interval - elapsed
-            if rem > 0: time.sleep(rem)
+            sleep = interval - (time.perf_counter() - t0)
+            if sleep > 0:
+                time.sleep(sleep)
 
     # ── public API ────────────────────────────────────────
 
     def start(self):
-        if self.active: return
-        self.gamepad = vg.VX360Gamepad()
-        self.active  = True
+        if self.active:
+            return
+        self.gamepad     = vg.VX360Gamepad()
+        self.active      = True
+        self._mouse_x    = None
+        self._mouse_y    = None
+        self._mouse_dx   = 0.0
+        self._mouse_dy   = 0.0
         self.pressed.clear()
-        self._mouse_x = None
-        self._mouse_y = None
+        self._rebuild_reverse()
 
-        # Keyboard via pynput (works fine for keys)
         self._kb_listener = kb.Listener(
             on_press=self._on_key_press,
-            on_release=self._on_key_release
+            on_release=self._on_key_release,
+        )
+        # NOTE: on_move signature is (x, y) — NO dx/dy in pynput
+        self._ms_listener = ms.Listener(
+            on_move=self._on_mouse_move,
+            on_click=self._on_mouse_click,
         )
         self._kb_listener.start()
-
-        # Mouse via Windows low-level hook (works inside games)
-        self._mouse_hook = LowLevelMouseHook(
-            on_move=self._on_mouse_move,
-            on_button=self._on_mouse_button
-        )
-        self._mouse_hook.start()
+        self._ms_listener.start()
 
         self._update_thread = threading.Thread(target=self._update_loop, daemon=True)
         self._update_thread.start()
@@ -362,10 +256,8 @@ class GamepadEmulator:
         self.active = False
         if self._kb_listener:
             self._kb_listener.stop()
-        if self._mouse_hook:
-            self._mouse_hook.stop()
-        self._rs_x_smooth = 0.0
-        self._rs_y_smooth = 0.0
+        if self._ms_listener:
+            self._ms_listener.stop()
         self.gamepad = None
 
 
@@ -374,11 +266,11 @@ class GamepadEmulator:
 # ─────────────────────────────────────────────
 
 BUTTON_GROUPS = [
-    ("D-Pad",                ["DPAD_UP","DPAD_DOWN","DPAD_LEFT","DPAD_RIGHT"]),
-    ("Face Buttons",         ["BTN_A","BTN_B","BTN_X","BTN_Y"]),
-    ("Special",              ["BTN_START","BTN_BACK","BTN_LTHUMB","BTN_RTHUMB"]),
-    ("Shoulders & Triggers", ["BTN_LB","BTN_RB","TRIGGER_LT","TRIGGER_RT"]),
-    ("Left Stick Keys",      ["LS_UP","LS_DOWN","LS_LEFT","LS_RIGHT"]),
+    ("D-Pad",              ["DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT"]),
+    ("Face Buttons",       ["BTN_A", "BTN_B", "BTN_X", "BTN_Y"]),
+    ("Special",            ["BTN_START", "BTN_BACK", "BTN_LTHUMB", "BTN_RTHUMB"]),
+    ("Shoulders & Triggers", ["BTN_LB", "BTN_RB", "TRIGGER_LT", "TRIGGER_RT"]),
+    ("Left Stick Keys",    ["LS_UP", "LS_DOWN", "LS_LEFT", "LS_RIGHT"]),
 ]
 
 FRIENDLY = {
@@ -404,289 +296,326 @@ FRIENDLY = {
     "LS_RIGHT":   "Left Stick Right",
 }
 
-SETUP_TEXT = """INSTALLATION
-────────────────────────────────────
-1. Install ViGEmBus driver
-   https://github.com/ViGEm/ViGEmBus/releases
+# Tkinter button number → pynput-style name
+TK_MOUSE_BTN = {
+    1: "buttonleft",
+    2: "buttonmiddle",
+    3: "buttonright",
+}
 
-2. Install Python packages
-   pip install vgamepad pynput
-
-3. RIGHT-CLICK the script -> Run as administrator
-   (REQUIRED for mouse hook to work in games!)
-
-HOW TO USE
-────────────────────────────────────
-• Click Activate — Xbox 360 controller appears instantly
-• Click any key chip to remap, then press a key or mouse button
-• Mouse movement  -> Right Stick (camera / aim)
-• Left mouse btn  -> RT (Fire)
-• Right mouse btn -> LT (ADS)
-• WASD            -> Left Stick (movement)
-
-MOUSE TECH NOTE
-────────────────────────────────────
-Mouse clicks use a Windows low-level hook (WH_MOUSE_LL).
-This captures clicks even inside fullscreen games.
-pynput alone cannot do this — that's why admin + this
-hook approach is required.
-
-APEX LEGENDS TIPS
-────────────────────────────────────
-• Controller preset in Apex: Default
-• Ultimate = LB + RB (hold Q + G together)
-• Run Apex in Borderless Windowed for best results
-"""
+BG    = "#1e1e2e"
+CARD  = "#2a2a3e"
+FG    = "#cdd6f4"
+ACC   = "#89b4fa"
+MUTED = "#6c7086"
+RED   = "#f38ba8"
+GREEN = "#a6e3a1"
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("KeyPad Emulator")
-        self.geometry("800x530")
+        self.configure(bg=BG)
         self.resizable(True, True)
-        self.configure(bg="#1a1d2e")
 
-        self.key_map  = dict(DEFAULT_MAP)
-        self.emulator = None
-        self.active   = False
-        self._waiting_for_key = None
-        self._remap_kb = None
-        self._remap_ms_hook = None
+        self.key_map       = dict(DEFAULT_MAP)
+        self.emulator      = None
+        self.active        = False
+        self.listening_for = None
+        self.entry_vars    = {}
+        self.entry_widgets = {}
+        self._extra_ms     = None
 
         self._build_ui()
+        # Size: wide enough for all 5 columns, tall enough to show all rows
+        self.geometry("1150x560")
+        self.minsize(900, 480)
+
+    # ── UI ────────────────────────────────────────────────
 
     def _build_ui(self):
-        hdr = tk.Frame(self, bg="#1a1d2e")
-        hdr.pack(fill="x", padx=12, pady=(10, 4))
+        # ── Header ──
+        hdr = tk.Frame(self, bg="#11111b", pady=10, padx=20)
+        hdr.pack(fill=tk.X)
 
-        tk.Label(hdr, text="  KeyPad Emulator",
-                 font=("Segoe UI", 14, "bold"),
-                 fg="white", bg="#1a1d2e").pack(side="left")
+        tk.Label(hdr, text="KeyPad Emulator",
+                 font=("Segoe UI", 14, "bold"), bg="#11111b", fg=FG).pack(side=tk.LEFT)
 
-        self._status_var = tk.StringVar(value="Inactive")
-        self._status_dot = tk.Label(hdr, text="●", fg="#666", bg="#1a1d2e",
-                                    font=("Segoe UI", 11))
-        self._status_dot.pack(side="left", padx=(16, 4))
-        tk.Label(hdr, textvariable=self._status_var,
-                 font=("Segoe UI", 10), fg="#888", bg="#1a1d2e").pack(side="left")
+        self.status_lbl = tk.Label(hdr, text="● Inactive",
+                                   font=("Segoe UI", 11), bg="#11111b", fg=MUTED)
+        self.status_lbl.pack(side=tk.LEFT, padx=20)
 
-        self._toggle_btn = tk.Button(
-            hdr, text="  Activate",
-            font=("Segoe UI", 10, "bold"),
-            bg="#e05c8a", fg="white", relief="flat",
-            padx=14, pady=5, cursor="hand2",
-            command=self._toggle
-        )
-        self._toggle_btn.pack(side="right")
+        self.toggle_btn = tk.Button(
+            hdr, text="Activate", font=("Segoe UI", 10, "bold"),
+            bg=RED, fg="#1e1e2e", relief=tk.FLAT, padx=14, pady=5,
+            cursor="hand2", command=self.toggle_emulator)
+        self.toggle_btn.pack(side=tk.RIGHT)
 
-        style = ttk.Style()
-        style.theme_use("default")
-        style.configure("TNotebook", background="#1a1d2e", borderwidth=0)
-        style.configure("TNotebook.Tab", background="#22253a", foreground="#aaa",
-                        padding=[10, 4], font=("Segoe UI", 9))
+        # ── Notebook ──
+        nb_wrap = tk.Frame(self, bg=BG, padx=14, pady=10)
+        nb_wrap.pack(fill=tk.BOTH, expand=True)
+
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("TNotebook",     background=BG,   borderwidth=0)
+        style.configure("TNotebook.Tab", background=CARD, foreground=FG,
+                        padding=[12, 5], font=("Segoe UI", 10))
         style.map("TNotebook.Tab",
-                  background=[("selected","#2d3150")],
-                  foreground=[("selected","white")])
+                  background=[("selected", "#45475a")],
+                  foreground=[("selected", FG)])
+        style.configure("Vertical.TScrollbar", background=CARD, troughcolor=BG,
+                        borderwidth=0, arrowcolor=FG)
 
-        nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=8, pady=(0,4))
+        nb = ttk.Notebook(nb_wrap)
+        nb.pack(fill=tk.BOTH, expand=True)
 
-        self._map_frame      = tk.Frame(nb, bg="#1a1d2e")
-        self._settings_frame = tk.Frame(nb, bg="#1a1d2e")
-        self._setup_frame    = tk.Frame(nb, bg="#1a1d2e")
+        # ── Mapping tab ──
+        map_outer = tk.Frame(nb, bg=BG)
+        nb.add(map_outer, text="Button Mapping")
 
-        nb.add(self._map_frame,      text="Button Mapping")
-        nb.add(self._settings_frame, text="Settings")
-        nb.add(self._setup_frame,    text="Setup")
+        canvas = tk.Canvas(map_outer, bg=BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(map_outer, orient="vertical", command=canvas.yview)
+        hscroll = ttk.Scrollbar(map_outer, orient="horizontal", command=canvas.xview)
 
-        self._build_mapping_tab()
-        self._build_settings_tab()
-        self._build_setup_tab()
+        inner = tk.Frame(canvas, bg=BG)
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
-        tk.Label(self,
-                 text="Click any key chip to remap  •  Mouse -> Right Stick  •  LClick=Fire(RT)  RClick=ADS(LT)",
-                 font=("Segoe UI", 8), fg="#555", bg="#1a1d2e"
-                 ).pack(side="bottom", pady=(0,4))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=vscroll.set, xscrollcommand=hscroll.set)
 
-    def _build_mapping_tab(self):
-        container = tk.Frame(self._map_frame, bg="#1a1d2e")
-        container.pack(fill="both", expand=True)
+        hscroll.pack(side=tk.BOTTOM, fill=tk.X)
+        vscroll.pack(side=tk.RIGHT,  fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        canvas = tk.Canvas(container, bg="#1a1d2e", highlightthickness=0)
-        vsb = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
+        # Mouse-wheel scroll
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
-        inner = tk.Frame(canvas, bg="#1a1d2e")
-        win_id = canvas.create_window((0,0), window=inner, anchor="nw")
-
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(
-            win_id, width=e.width))
-        inner.bind("<Configure>", lambda e: canvas.configure(
-            scrollregion=canvas.bbox("all")))
-        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(
-            int(-1*(e.delta/120)), "units"))
-
-        self._key_buttons = {}
-        cols = 3
-
-        for idx, (group_name, actions) in enumerate(BUTTON_GROUPS):
-            col = idx % cols
-            row = idx // cols
-
-            grp = tk.LabelFrame(inner, text=group_name,
-                                 font=("Segoe UI", 9, "bold"),
-                                 fg="#5ab4f5", bg="#22253a",
-                                 padx=8, pady=6, relief="groove")
-            grp.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
-            inner.columnconfigure(col, weight=1)
+        # Build columns
+        for col, (group_name, actions) in enumerate(BUTTON_GROUPS):
+            grp = tk.LabelFrame(
+                inner, text=f"  {group_name}  ",
+                font=("Segoe UI", 10, "bold"),
+                bg=CARD, fg=ACC, bd=1, relief=tk.GROOVE,
+                padx=12, pady=10, labelanchor="nw",
+            )
+            grp.grid(row=0, column=col, padx=8, pady=10, sticky="n")
 
             for action in actions:
-                rf = tk.Frame(grp, bg="#22253a")
-                rf.pack(fill="x", pady=2)
+                row_f = tk.Frame(grp, bg=CARD)
+                row_f.pack(fill=tk.X, pady=4)
 
-                tk.Label(rf, text=FRIENDLY.get(action, action),
-                         font=("Segoe UI", 8), fg="#bbb", bg="#22253a",
-                         anchor="w").pack(side="left", fill="x", expand=True)
+                tk.Label(
+                    row_f, text=FRIENDLY[action],
+                    font=("Segoe UI", 10), bg=CARD, fg=FG,
+                    width=24, anchor="w",
+                ).pack(side=tk.LEFT)
 
-                key_val = self.key_map.get(action, "-")
-                btn = tk.Button(
-                    rf, text=key_val,
-                    font=("Segoe UI", 9, "bold"),
-                    fg="#5ab4f5", bg="#2d3150",
-                    relief="flat", padx=6, pady=2,
-                    width=9, cursor="hand2",
-                    command=lambda a=action: self._start_remap(a)
+                var = tk.StringVar(value=self.key_map[action])
+                self.entry_vars[action] = var
+
+                chip = tk.Button(
+                    row_f, textvariable=var,
+                    font=("Segoe UI Mono", 10, "bold"),
+                    bg="#313244", fg=ACC, relief=tk.FLAT,
+                    width=13, cursor="hand2",
+                    command=lambda a=action: self.start_listen(a),
                 )
-                btn.pack(side="right")
-                self._key_buttons[action] = btn
+                chip.pack(side=tk.LEFT, padx=6)
+                self.entry_widgets[action] = chip
 
-    def _build_settings_tab(self):
-        f = self._settings_frame
-        sliders = [
-            ("Mouse Sensitivity", "_mouse_sens", 0.1, 3.0, 0.8),
-            ("Left Stick Speed",  "_ls_speed",   0.1, 1.0, 1.0),
-            ("Dead Zone",         "_dead_zone",  0.0, 0.5, 0.0),
-            ("Stick Smoothing",   "_smoothing",  0.0, 0.9, 0.37),
-        ]
-        for i, (label, attr, lo, hi, default) in enumerate(sliders):
-            tk.Label(f, text=label, fg="#bbb", bg="#1a1d2e",
-                     font=("Segoe UI", 10), anchor="w"
-                     ).grid(row=i, column=0, sticky="w", padx=20, pady=10)
-            var = tk.DoubleVar(value=default)
-            setattr(self, attr, var)
-            ttk.Scale(f, from_=lo, to=hi, variable=var,
-                      orient="horizontal", length=340
-                      ).grid(row=i, column=1, padx=10, pady=10)
-            disp = tk.StringVar(value=f"{default:.2f}")
-            var.trace_add("write", lambda *a, v=var, d=disp: d.set(f"{v.get():.2f}"))
-            tk.Label(f, textvariable=disp, fg="#5ab4f5", bg="#1a1d2e",
-                     font=("Segoe UI", 10), width=5
-                     ).grid(row=i, column=2, padx=6)
+        # ── Settings tab ──
+        settings_frame = tk.Frame(nb, bg=BG, padx=24, pady=18)
+        nb.add(settings_frame, text="Settings")
 
-        tk.Label(f,
-                 text=("Right stick is always controlled by mouse movement.\n"
-                       "Left click = Fire (RT)  •  Right click = ADS (LT)\n\n"
-                       "Mouse clicks use WH_MOUSE_LL hook — works inside games."),
-                 fg="#666", bg="#1a1d2e", font=("Segoe UI", 9), justify="left"
-                 ).grid(row=len(sliders), column=0, columnspan=3,
-                        sticky="w", padx=20, pady=10)
+        def slider_row(parent, label, from_, to, initial, fmt):
+            f = tk.Frame(parent, bg=BG)
+            f.pack(fill=tk.X, pady=10)
+            tk.Label(f, text=label, font=("Segoe UI", 10),
+                     bg=BG, fg=FG, width=22, anchor="w").pack(side=tk.LEFT)
+            val_lbl = tk.Label(f, text=fmt(initial),
+                               font=("Segoe UI", 10, "bold"), bg=BG, fg=ACC, width=6)
+            val_lbl.pack(side=tk.RIGHT)
+            sc = ttk.Scale(f, from_=from_, to=to, orient=tk.HORIZONTAL,
+                           command=lambda v, l=val_lbl, f=fmt: l.config(text=f(float(v))))
+            sc.set(initial)
+            sc.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+            return sc
 
-    def _build_setup_tab(self):
-        txt = tk.Text(self._setup_frame, bg="#1a1d2e", fg="#aaa",
-                      font=("Consolas", 9), relief="flat",
-                      wrap="word", padx=14, pady=10)
-        txt.pack(fill="both", expand=True)
-        txt.insert("end", SETUP_TEXT)
-        txt.config(state="disabled")
+        self.ms_scale = slider_row(settings_frame, "Mouse Sensitivity",
+                                   0.1, 2.0, 0.5, lambda v: f"{v:.2f}")
+        self.ls_scale = slider_row(settings_frame, "Left Stick Speed",
+                                   0.1, 2.0, 1.0, lambda v: f"{v:.2f}")
+        self.dz_scale = slider_row(settings_frame, "Dead Zone",
+                                   0.0, 0.5, 0.1, lambda v: f"{int(v*100)}%")
 
-    # ── remapping ─────────────────────────────────────────
+        tk.Label(settings_frame,
+                 text="Right stick is always controlled by mouse movement.",
+                 font=("Segoe UI", 9), bg=BG, fg=MUTED).pack(anchor="w", pady=(18, 0))
 
-    def _start_remap(self, action):
-        if self._waiting_for_key: return
-        self._waiting_for_key = action
-        self._key_buttons[action].config(text="...", fg="#ffcc00")
+        # ── Setup tab ──
+        inst_frame = tk.Frame(nb, bg=BG, padx=24, pady=18)
+        nb.add(inst_frame, text="Setup")
 
-        # keyboard via pynput
-        self._remap_kb = kb.Listener(on_press=self._capture_key)
-        self._remap_kb.start()
-
-        # mouse via low-level hook
-        self._remap_ms_hook = LowLevelMouseHook(
-            on_move=lambda x, y: None,
-            on_button=self._capture_mouse_btn
+        instructions = (
+            "INSTALLATION\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "1. Install ViGEmBus driver\n"
+            "   → https://github.com/ViGEm/ViGEmBus/releases\n"
+            "   (Download & run the latest .exe installer)\n\n"
+            "2. Install Python packages\n"
+            "   > pip install vgamepad pynput\n\n"
+            "3. Run this script\n"
+            "   > python keypad_emulator.py\n\n"
+            "HOW TO USE\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "• Click 'Activate' — Windows detects an Xbox 360 controller.\n"
+            "• To remap: click a key chip, then press any key or mouse button.\n"
+            "  Side buttons (X1/X2 on G304 etc.) are supported.\n"
+            "• Press Escape to cancel a remap.\n"
+            "• Mouse movement  → Right Stick (camera / aim)\n"
+            "• Left click      → RT / Fire  (default)\n"
+            "• Right click     → LT / ADS   (default)\n\n"
+            "NOTES\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "• Works with Steam, Epic Games, Xbox Game Pass, etc.\n"
+            "• Run as Administrator if the virtual controller is not detected.\n"
+            "• Changes to mappings take effect immediately, even while active.\n"
         )
-        self._remap_ms_hook.start()
+        tk.Label(inst_frame, text=instructions, font=("Consolas", 10),
+                 bg=BG, fg=FG, justify=tk.LEFT).pack(anchor="w")
 
-    def _capture_key(self, key):
-        if not self._waiting_for_key: return False
-        skip = {"Key.shift","Key.shift_l","Key.shift_r",
-                "Key.ctrl_l","Key.ctrl_r","Key.alt_l","Key.alt_r"}
-        if str(key) in skip: return
-        try:
-            k = key.char.lower()
-        except AttributeError:
-            k = str(key).replace("Key.", "").lower()
-        self._apply_remap(k)
-        return False
+        # ── Footer ──
+        foot = tk.Frame(self, bg="#11111b", pady=6, padx=16)
+        foot.pack(fill=tk.X, side=tk.BOTTOM)
+        tk.Label(
+            foot,
+            text="Click any key chip to remap  •  Mouse → Right Stick  "
+                 "•  LClick = Fire (RT)   RClick = ADS (LT)",
+            font=("Segoe UI", 9), bg="#11111b", fg=MUTED,
+        ).pack(side=tk.LEFT)
 
-    def _capture_mouse_btn(self, name, pressed):
-        if not self._waiting_for_key or not pressed: return
-        self._apply_remap(name)
+    # ── Remap logic ───────────────────────────────────────
 
-    def _apply_remap(self, new_key):
-        action = self._waiting_for_key
-        self._waiting_for_key = None
-        self.key_map[action] = new_key
-        self.after(0, lambda: self._key_buttons[action].config(
-            text=new_key, fg="#5ab4f5"))
-        try:
-            self._remap_kb.stop()
-        except Exception: pass
-        try:
-            self._remap_ms_hook.stop()
-        except Exception: pass
+    def start_listen(self, action):
+        self._cancel_listen(silent=True)
+        self.listening_for = action
+
+        w = self.entry_widgets[action]
+        self.entry_vars[action].set("Press…")
+        w.config(bg="#45475a", fg=RED)
+
+        # Keyboard
+        self.bind("<KeyPress>", self._capture_key)
+
+        # Standard mouse buttons via Tkinter (delayed to skip the chip click)
+        self.after(150, self._bind_tk_mouse)
+
+        # Side buttons (X1, X2, …) via pynput
+        def _pynput_click(x, y, btn, pressed):
+            if not pressed or not self.listening_for:
+                return False
+            name = str(btn).lower().replace("button.", "button")
+            self.after(0, lambda n=name: self._apply_capture(n))
+            return False
+
+        self._extra_ms = ms.Listener(on_click=_pynput_click)
+        self._extra_ms.start()
+
+    def _bind_tk_mouse(self):
+        if not self.listening_for:
+            return
+        self.bind("<Button-1>", self._capture_tk_mouse)
+        self.bind("<Button-2>", self._capture_tk_mouse)
+        self.bind("<Button-3>", self._capture_tk_mouse)
+
+    def _capture_key(self, event):
+        if not self.listening_for:
+            return
+        if event.keysym.lower() == "escape":
+            self._cancel_listen()
+            return
+        self._apply_capture(event.keysym.lower())
+
+    def _capture_tk_mouse(self, event):
+        if not self.listening_for:
+            return
+        w = self.entry_widgets.get(self.listening_for)
+        if event.widget is w:
+            return
+        self._apply_capture(TK_MOUSE_BTN.get(event.num, f"button{event.num}"))
+
+    def _apply_capture(self, key_name):
+        action = self.listening_for
+        if not action:
+            return
+        self.key_map[action] = key_name
+        self.entry_vars[action].set(key_name)
+        self.entry_widgets[action].config(bg="#313244", fg=ACC)
+        self._cleanup_listeners()
+        self.listening_for = None
         if self.emulator:
-            self.emulator.key_map = self.key_map
-            self.emulator._build_reverse()
+            self.emulator.key_map = dict(self.key_map)
+            self.emulator._rebuild_reverse()
 
-    # ── activate / deactivate ─────────────────────────────
+    def _cancel_listen(self, silent=False):
+        action = self.listening_for
+        if action:
+            self.entry_vars[action].set(self.key_map[action])
+            self.entry_widgets[action].config(bg="#313244", fg=ACC)
+        self._cleanup_listeners()
+        self.listening_for = None
 
-    def _toggle(self):
-        if not self.active: self._activate()
-        else: self._deactivate()
+    def _cleanup_listeners(self):
+        self.unbind("<KeyPress>")
+        self.unbind("<Button-1>")
+        self.unbind("<Button-2>")
+        self.unbind("<Button-3>")
+        if self._extra_ms:
+            try:
+                self._extra_ms.stop()
+            except Exception:
+                pass
+            self._extra_ms = None
 
-    def _activate(self):
-        try:
-            self.emulator = GamepadEmulator(
-                key_map=self.key_map,
-                mouse_sensitivity=round(self._mouse_sens.get(), 2),
-                ls_sensitivity=round(self._ls_speed.get(), 2),
-                dead_zone=round(self._dead_zone.get(), 2),
-                stick_smoothing=round(self._smoothing.get(), 2),
-            )
-            self.emulator.start()
-            self.active = True
-            self._status_var.set("Active — Xbox 360 controller connected")
-            self._status_dot.config(fg="#4caf50")
-            self._toggle_btn.config(text="  Deactivate")
-        except Exception as e:
-            messagebox.showerror("Error",
-                f"Failed to activate:\n{e}\n\nTry running as Administrator.")
+    # ── Activate / Deactivate ─────────────────────────────
 
-    def _deactivate(self):
-        if self.emulator:
-            self.emulator.stop()
-            self.emulator = None
-        self.active = False
-        self._status_var.set("Inactive")
-        self._status_dot.config(fg="#666")
-        self._toggle_btn.config(text="  Activate")
+    def toggle_emulator(self):
+        if not self.active:
+            try:
+                emu = GamepadEmulator(
+                    key_map=dict(self.key_map),
+                    mouse_sensitivity=self.ms_scale.get(),
+                    ls_sensitivity=self.ls_scale.get(),
+                    dead_zone=self.dz_scale.get(),
+                )
+                emu.start()
+                self.emulator = emu
+                self.active   = True
+                self.status_lbl.config(
+                    text="● Active — Xbox 360 controller connected", fg=GREEN)
+                self.toggle_btn.config(text="Deactivate", bg="#313244", fg=FG)
+            except Exception as ex:
+                messagebox.showerror(
+                    "Error",
+                    f"Could not start emulator:\n{ex}\n\n"
+                    "Make sure ViGEmBus driver is installed.",
+                )
+        else:
+            if self.emulator:
+                self.emulator.stop()
+                self.emulator = None
+            self.active = False
+            self.status_lbl.config(text="● Inactive", fg=MUTED)
+            self.toggle_btn.config(text="Activate", bg=RED, fg="#1e1e2e")
 
     def on_close(self):
-        self._deactivate()
+        if self.emulator:
+            self.emulator.stop()
+        self._cleanup_listeners()
         self.destroy()
 
 
